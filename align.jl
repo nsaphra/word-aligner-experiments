@@ -1,12 +1,13 @@
 module HMMWordAligners
 import DataStructures.OrderedDict
 import DataStructures.DefaultDict
+import DataStructures.DefaultOrderedDict
 
 abstract AbstractWordAligner
 type HMMAligner{S<:String} <: AbstractWordAligner
     # e = target/emitter, f = source/emission
-    f_vocab::Vector{S}
-    e_vocab::Vector{S}
+    f_vocab::Set{S}
+    e_vocab::Set{S}
 
     # P(F|E)
     align_probs::Dict{S, Dict{S, Float64}}
@@ -14,8 +15,8 @@ type HMMAligner{S<:String} <: AbstractWordAligner
     trans_probs::OrderedDict{Int, Float64}
     start_probs::OrderedDict{Int, Float64}
 
-    function HMMAligner{S}(f_vocab::Vector{S}, e_vocab::Vector{S};
-                           jump_range=10, diag_prob=0.5, init_dist="uniform")
+    function HMMAligner(f_vocab::Set{S}, e_vocab::Set{S};
+                        jump_range=10, diag_prob=0.5, init_dist="uniform")
         align_probs
         if init_dist == "uniform"
             align_prob = (1.0 / length(f_vocab))::Float64
@@ -26,7 +27,7 @@ type HMMAligner{S<:String} <: AbstractWordAligner
 
         trans_prob = ((1.0 - diag_prob) / (jump_range * 2))::Float64
 #        trans_probs = OrderedDict{Int, Float64}()
-        trans_probs = OrderedDict([(j, trans_prob) for j=-jump_range:jump_range])::OrderedDict{Int, Float64}
+        trans_probs = OrderedDict([(j, trans_prob) for j=-jump_range:jump_range])
         trans_probs[1] = diag_prob
 
         start_prob = (1.0 - diag_prob) / (jump_range - 1)
@@ -36,12 +37,20 @@ type HMMAligner{S<:String} <: AbstractWordAligner
         new(f_vocab, e_vocab, align_probs, trans_probs, start_probs)
     end
 
-    HMMAligner(f_vocab, e_vocab;
-               jump_range=10, diag_prob=0.5, init_dist="uniform") =
-            HMMAligner{eltype(f_vocab)}(f_vocab, e_vocab, jump_range, diag_prob, init_dist)
+    function HMMAligner(bitext::Vector{(Vector{S}, Vector{S})})
+        f_vocab = Set{S}()
+        e_vocab = Set{S}()
+        for (f,e) = bitext
+            union!(f_vocab, f)
+            union!(e_vocab, e)
+        end
+        return HMMAligner{S}(f_vocab, e_vocab)
+    end
 
-    HMMAligner(bitext) = HMMAligner(reduce((fe, f_vocab) -> union(set(fe[1]), f_vocab), bitext, set()),
-                                    reduce((fe, e_vocab) -> union(set(fe[2]), e_vocab), bitext, set()))
+    #TODO uncomment when foldl is in Base
+    #HMMAligner(bitext::Vector{(Vector{S}, Vector{S})}) =
+    #    HMMAligner(foldl((f_vocab, fe) -> union!(f_vocab, fe[1])::Set{S}, Set{S}(), bitext),
+    #               foldl((e_vocab, fe) -> union!(e_vocab, fe[2])::Set{S}, Set{S}(), bitext))
 end
 
 # parameters to calculate expected counts:
@@ -51,10 +60,19 @@ type HMMAlignerECounts{S}
     gamma_sum_no_last::Float64
     # sum_by_vocab is stored as e=>f=>prob to optimize for spatially localized hashing
     gamma_sum_by_vocab::Dict{S, Dict{S, Float64}}
-    digamma_sum::Vector{Float64}
+    digamma_sum::Dict{Int, Float64}
     gammas_start::Vector{Float64}
 end
 
+macro bound_loop(ind, arr)
+    quote
+        if $ind < 1
+            continue
+         elseif $ind > length($arr)
+            break
+         end
+    end
+end
 
 #TODO why won't julia let me specify a type for a?
 function forward(a, f_sent, e_sent)
@@ -72,15 +90,18 @@ function forward(a, f_sent, e_sent)
             continue
         end
 
+        println(a.trans_probs)
         for (jmp, trans_prob) = a.trans_probs,
             (prev_e_ind, p) = enumerate(fwd[f_ind - 1,:])
             e_ind = prev_e_ind + jmp
-            if e_ind > length(e_sent)
+            @bound_loop(e_ind, e_sent)
+            if e_ind < 1
+                continue
+            elseif e_ind > length(e_sent)
                 break
             end
-            if e_ind >= 1 # in sentence bounds
-                fwd[f_ind, e_ind] += (a.align_probs[f][e_sent[e_ind]] * trans_prob * p)
-            end
+
+            fwd[f_ind, e_ind] += (a.align_probs[f][e_sent[e_ind]] * trans_prob * p)
         end
     end
     return fwd
@@ -101,16 +122,18 @@ function backward(a, f_sent, e_sent)
             continue
         end
 
+        println(a.trans_probs)
         for (jmp, trans_prob) = a.trans_probs,
             (next_e_ind, p) = enumerate(bkw[f_ind + 1,:])
             e_ind = next_e_ind - jmp
-            if e_ind > length(e_sent)
+            if e_ind < 1
+                continue
+            elseif e_ind > length(e_sent)
                 break
             end
-            if e_ind >= 1
-                bkw[f_ind, e_ind] += (a.align_probs[f_sent[f_ind+1]][e_sent[next_e_ind]]
-                                      * trans_prob * p)
-            end
+
+            bkw[f_ind, e_ind] += (a.align_probs[f_sent[f_ind+1]][e_sent[next_e_ind]]
+                                  * trans_prob * p)
         end
     end
     return bkw
@@ -120,26 +143,45 @@ function expectation_step(c::HMMAlignerECounts, a, f_sent, e_sent)
     fwd = forward(a, f_sent, e_sent)
     bkw = backward(a, f_sent, e_sent)
 
+    print("YO")
+    println(a.trans_probs)
     for (f_ind, f) = enumerate(f_sent)
         gamma_denom = 0.0
-        for (e_ind, e) = enumerate(e_sent)
-            gamma_denom += fwd[f_ind][e_ind] * bkw[f_ind][e_ind]
+        digamma_denom = 0.0
 
-            if (f_ind >= length(f_sent)-1)
-                continue
+        print("WHAT")
+        println(a.trans_probs)
+        for (e_ind, e) = enumerate(e_sent)
+            print("poo")
+            println(a.trans_probs)
+            gamma_denom += fwd[f_ind, e_ind] * bkw[f_ind, e_ind]
+            
+            print("poo2")
+            println(a.trans_probs)
+
+            if (f_ind == length(f_sent))
+                continue # last token doesn't give trans prob
             end
             for (e_ind2, e2) = enumerate(e_sent)
-                digamma_denom += fwd[f_ind][e_ind] * a.trans_probs[e_ind2 - e_ind] *
-                                 bkw[f_ind+1][e_ind2] * a.align_probs(f_sent[f_ind+1], e2)
+                # TODO macro
+                
+                digamma_denom += fwd[f_ind, e_ind] * a.trans_probs[e_ind2 - e_ind] *
+                                 bkw[f_ind+1, e_ind2] * a.align_probs[f_sent[f_ind+1]][e2]
             end
+            print("poo3")
+            println(a.trans_probs)
             if digamma_denom == 0
                 digamma_denom = 1e-9
             end
+            print("poo4")
+            println(a.trans_probs)
         end
 
+print("HI")
+println(a.trans_probs)
         for (e_ind, e) = enumerate(e_sent)
             if gamma_denom == 0
-                gamma_denom = 1e-9
+                gamma_denom = 1e-9 # TODO logs
             end
 
             new_gamma = fwd[f_ind, e_ind] * bkw[f_ind, e_ind] / gamma_denom
@@ -148,35 +190,45 @@ function expectation_step(c::HMMAlignerECounts, a, f_sent, e_sent)
             if f_ind == 1
                 c.gammas_start[e_ind] += new_gamma
             end
-            if f_ind >= length(f_sent)
+
+            if f_ind == length(f_sent)
                 continue
             end
 
             # transition probs
             c.gamma_sum_no_last += new_gamma
-            for (e_ind2, e2) = enumerate(e_sent)
-                c.digamma_sum[e_ind2 - e_ind] +=
-                    fwd[f_ind, e_ind] * self.trans_probs[e_ind2 - e_ind] *
-                    bkw[f_ind+1, e_ind2] * self.smoothed_align_probs(f_sent[f_ind+1], e2) /
+            # TODO make macro for this
+            println(a.trans_probs)
+            for (jmp, trans_prob) = a.trans_probs
+                e_ind2 = e_ind + jmp
+                if e_ind2 < 1
+                    continue
+                elseif e_ind2 > length(e_sent)
+                    break
+                end
+
+                c.digamma_sum[jmp] +=
+                    fwd[f_ind, e_ind] * trans_prob *
+                    bkw[f_ind+1, e_ind2] * a.align_probs[f_sent[f_ind+1]][e_sent[e_ind2]] /
                     digamma_denom
             end
         end
     end
 end
 
-function train(a, bitext; numiter=100, epsilon=0.5)
+function train{S}(a, bitext::Vector{(Vector{S}, Vector{S})}, numiter=100, epsilon=0.5)
     for iter = 1:numiter
         diff = 0.0
-        if i%10 == 0
+        if iter%10 == 0
             write(STDERR, "Training")
         end
 
-        counts = HMMAlignerECounts(0.0,
-                                   [e=>[f=>0.0 for f = a.f_vocab] for e = a.e_vocab],
-                                   [i=>0.0 for i = keys(a.trans_probs)],
-                                   [0.0 for i = 1:length(a.start_probs)])
+        counts = HMMAlignerECounts{S}(0.0,
+                                      [e=>[f=>0.0::Float64 for f = a.f_vocab]::Dict{String, Float64} for e = a.e_vocab],
+                                      [i=>0.0 for i = keys(a.trans_probs)],
+                                      [0.0 for i = 1:length(a.start_probs)])
         for (n, (f_sent, e_sent)) = enumerate(bitext)
-            self.expectations_step(counts, a, f_sent, e_sent)
+            expectation_step(counts, a, f_sent, e_sent)
         end
 
         a.start_probs = counts.gammas_start
@@ -194,7 +246,7 @@ function train(a, bitext; numiter=100, epsilon=0.5)
             end
         end
 
-        for jump in keys(a.trans_probs)
+        for jump = keys(a.trans_probs)
             old_p = a.trans_probs[jump]
             a.trans_probs[jump] = counts.digamma_sum[jump] / counts.gamma_sum_no_last
             diff += abs(a.trans_probs[jump] - old_p)
@@ -207,7 +259,92 @@ function train(a, bitext; numiter=100, epsilon=0.5)
 end
 
 function decode(a, bitext)
-    error("NOT IMPLEMENTED")
+    for (f_sent, e_sent) = bitext
+        V = [[0.0 for e_ind=1:length(e_sent)] for f_ind=1:length(f_sent)]
+        path = {}
+
+        for e_ind = keys(a.start_probs)
+            if e_ind > length(e_sent)
+                break
+            end
+            V[1][e_ind] = a.start_probs[e_ind] * a.align_probs[f_sent[1]][e_sent[e]]
+            path[e_ind] = [e_ind]
+        end
+
+        for (f_ind, f) = enumerate(f_sent)
+            if f_ind == 1
+                continue
+            end
+
+            new_path = Dict()
+            for (e_ind, e) = enumerate(e_sent)
+                (best_prob, best_prev_e) = findmax(
+                    [V[f_ind-1][prev_e_ind] * a.trans_probs[e_ind - prev_e_ind] * a.align_probs(f, e)
+                     for prev_e_ind = 1:length(V[f_ind-1])])
+                V[f_ind][e_ind] = best_prob
+                new_path[e_ind] = path[best_prev_e] + [e_ind]
+            end
+            path = new_path
+        end
+
+        (p, end_e) = findmax([V[length(f_sent)][e_ind] for e_ind=1:length(e_sent)])
+        for (f_ind, e_ind) = enumerate(path[end_e])
+             @printf "%i-%i " f_ind e_ind
+        end
+        println()
+    end
 end
 
+function main(opts)
+    f_data = @sprintf "%s.%s" opts["data"] opts["foreign"]
+    e_data = @sprintf "%s.%s" opts["data"] opts["english"]
+
+    bitext = [(split(strip(f)), split(strip(e)))
+              for (f, e) = zip(open(readlines, f_data), open(readlines, e_data))]
+    if length(bitext) > opts["num_sentences"]
+        bitext = bitext[1:opts["num_sentences"]]
+    end
+
+    #TODO get rid of type param for constructor
+    model = HMMAligner{String}(bitext)
+    train(model, bitext)
+
+    for __e = bitext
+        try
+            decode(model, [__e])
+        catch
+            println()
+        end
+    end
 end
+
+end # HMMWordAligners
+
+using ArgParse
+function parse_commandline()
+    s = ArgParseSettings()
+    @add_arg_table s begin
+        "--data", "-d"
+            help = "Data filename prefix"
+            default = "data/hansards"
+        "--english", "-e"
+            help = "Suffix of English filename"
+            default = "e"
+        "--foreign", "-f"
+            help = "Suffix of Foreign filename"
+            default = "f"
+        "--num_sentences", "-n"
+            help="Number of sentences (first in the file) to use for training and alignment"
+            default = 1000
+            arg_type = Int
+        "--num_iterations", "-i"
+            help = "Number of iterations to perform for EM"
+            default = 100
+            arg_type = Int
+    end
+
+    return parse_args(s)
+end
+
+opts = parse_commandline()
+HMMWordAligners.main(opts)

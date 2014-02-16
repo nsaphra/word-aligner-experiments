@@ -95,11 +95,6 @@ function forward(a, f_sent, e_sent)
             (prev_e_ind, p) = enumerate(fwd[f_ind - 1,:])
             e_ind = prev_e_ind + jmp
             @bound_loop(e_ind, e_sent)
-            if e_ind < 1
-                continue
-            elseif e_ind > length(e_sent)
-                break
-            end
 
             fwd[f_ind, e_ind] += (a.align_probs[f][e_sent[e_ind]] * trans_prob * p)
         end
@@ -126,11 +121,7 @@ function backward(a, f_sent, e_sent)
         for (jmp, trans_prob) = a.trans_probs,
             (next_e_ind, p) = enumerate(bkw[f_ind + 1,:])
             e_ind = next_e_ind - jmp
-            if e_ind < 1
-                continue
-            elseif e_ind > length(e_sent)
-                break
-            end
+            @bound_loop(e_ind, e_sent)
 
             bkw[f_ind, e_ind] += (a.align_probs[f_sent[f_ind+1]][e_sent[next_e_ind]]
                                   * trans_prob * p)
@@ -162,11 +153,12 @@ function expectation_step(c::HMMAlignerECounts, a, f_sent, e_sent)
             if (f_ind == length(f_sent))
                 continue # last token doesn't give trans prob
             end
-            for (e_ind2, e2) = enumerate(e_sent)
-                # TODO macro
+            for (jmp, trans_prob) = a.trans_probs
+                e_ind2 = e_ind + jmp
+                @bound_loop(e_ind, e_sent)
                 
-                digamma_denom += fwd[f_ind, e_ind] * a.trans_probs[e_ind2 - e_ind] *
-                                 bkw[f_ind+1, e_ind2] * a.align_probs[f_sent[f_ind+1]][e2]
+                digamma_denom += fwd[f_ind, e_ind] * trans_prob * bkw[f_ind+1, e_ind2] *
+                                 a.align_probs[f_sent[f_ind+1]][e_sent[e_ind2]]
             end
             print("poo3")
             println(a.trans_probs)
@@ -201,11 +193,7 @@ println(a.trans_probs)
             println(a.trans_probs)
             for (jmp, trans_prob) = a.trans_probs
                 e_ind2 = e_ind + jmp
-                if e_ind2 < 1
-                    continue
-                elseif e_ind2 > length(e_sent)
-                    break
-                end
+                @bound_loop(e_ind2, e_sent)
 
                 c.digamma_sum[jmp] +=
                     fwd[f_ind, e_ind] * trans_prob *

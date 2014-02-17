@@ -3,6 +3,7 @@ import optparse
 from collections import defaultdict
 from math import log
 import numpy as np
+import re
 
 class HMMAligner:
     """An HMM word alignment model"""
@@ -40,10 +41,15 @@ class HMMAligner:
                 self.start_probs[i] = 0.5 / 9
             self.start_probs[0] = 0.5
 
-    def forward(self, e_sent, f_sent):
+    def forward(self, e_sent, f_sent, alignments={}):
         fwd = [0] * len(f_sent)
         for (f_ind, f) in enumerate(f_sent): # target / input
             fwd[f_ind] = defaultdict(float)
+            if f_ind in alignments:
+                for e_ind in alignments[f_ind]:
+                    fwd[f_ind][e_ind] = 1.0/len(alignments[f_ind])
+                continue
+
             # base case
             if f_ind == 0:
                 for jump in self.start_probs.keys():
@@ -60,11 +66,15 @@ class HMMAligner:
                     fwd[f_ind][e_ind] += self.align_probs[f][e_sent[e_ind]] * p * self.trans_probs[jump]
         return fwd
 
-    def backward(self, e_sent, f_sent):
+    def backward(self, e_sent, f_sent, alignments={}):
         bkw = [0] * len(f_sent)
         for (rev_f_ind, f) in enumerate(reversed(f_sent)):
             f_ind = len(f_sent) - rev_f_ind - 1
             bkw[f_ind] = defaultdict(float)
+            if f_ind in alignments:
+                for e_ind in alignments[f_ind]:
+                    bkw[f_ind][e_ind] = 1.0/len(alignments[f_ind])
+                continue
 
             # base case
             if rev_f_ind == 0:
@@ -82,7 +92,7 @@ class HMMAligner:
                         * p
         return bkw
 
-    def expectation_step(self, e_sent, f_sent, gammas_0s, gamma_sum_no_last, gamma_sum_by_vocab, digamma_sum):
+    def expectation_step(self, e_sent, f_sent, gammas_0s, gamma_sum_no_last, gamma_sum_by_vocab, digamma_sum, alignments=None):
         fwd = self.forward(e_sent, f_sent)
         bkw = self.backward(e_sent, f_sent)
 
@@ -131,7 +141,7 @@ class HMMAligner:
         return (gammas_0s, gamma_sum_no_last, gamma_sum_by_vocab, digamma_sum)
 
     # bitext should be [target, source]
-    def train(self, bitext, numiter=100, epsilon=0.5):
+    def train(self, bitext, numiter=100, epsilon=0.5, likely_align_iter=10, fixed_a=None, all_a=None):
         print >> sys.stderr, "Training ..."
         for i in range(numiter):
             diff = 0.0
@@ -145,9 +155,17 @@ class HMMAligner:
             gammas_0s = defaultdict(float)
 
             for (n, (f_sent, e_sent)) in enumerate(bitext):
+                alignments = None
+                if n < len(all_a):
+                    if i < likely_align_iter:
+                        alignments = all_a
+                    else:
+                        alignments = fixed_a
+                    
                 (gammas_0s, gamma_sum_no_last, gamma_sum_by_vocab, digamma_sum) = \
                     self.expectation_step(e_sent, f_sent,\
-                                              gammas_0s, gamma_sum_no_last, gamma_sum_by_vocab, digamma_sum)
+                                              gammas_0s, gamma_sum_no_last, gamma_sum_by_vocab, digamma_sum,\
+                                              alignments=alignments)
 
             # compute maximum-likelihood params
             # TODO add start probs to the difference count
@@ -207,18 +225,39 @@ if __name__ == "__main__":
     optparser.add_option("-d", "--data", dest="train", default="data/hansards", help="Data filename prefix (default=data)")
     optparser.add_option("-e", "--english", dest="english", default="e", help="Suffix of English filename (default=e)")
     optparser.add_option("-f", "--french", dest="french", default="f", help="Suffix of French filename (default=f)")
-    optparser.add_option("-t", "--threshold", dest="threshold", default=0.5, type="float", help="Threshold for aligning with Dice's coefficient (default=0.5)")
     optparser.add_option("-n", "--num_sentences", dest="num_sents", default=1000, type="int", help="Number of sentences to use for training and alignment")
     optparser.add_option("-i", "--num_iterations", dest="numiter", default=100, type="int", help="Number of iterations to perform for EM")
     optparser.add_option("-p", "--model_pickle", dest="pickle_file", default="", help="File to store pickle of model if desired")
+    optparser.add_option("-a", "--alignments", dest="aligned", default="a", help="Suffix of alignments file (default=a)")
     (opts, _) = optparser.parse_args()
     f_data = "%s.%s" % (opts.train, opts.french)
     e_data = "%s.%s" % (opts.train, opts.english)
+    a_data = "%s.%s" % (opts.train, opts.aligned)
 
     bitext = [[sentence.strip().split() for sentence in pair] for pair in zip(open(f_data), open(e_data))[:opts.num_sents]]
     model = HMMAligner(bitext)
 
-    model.train(bitext, opts.numiter)
+    fixed_alignments=[sentence.strip().split() for sentence in open(a_data)]
+    fixed_a = [{} for sentence in fixed_alignments]
+    all_a = [{} for sentence in fixed_alignments]
+    if fixed_alignments:
+        for (i, sentence) in enumerate(fixed_alignments):
+            for a in sentence:
+                m = re.search(r"(\d+)(\?|-)(\d+)", a)
+                f_tok = int(m.group(1))
+                e_tok = int(m.group(3))
+                known = (m.group(2) == "-")
+                if known:
+                    if f_tok not in fixed_a:
+                        fixed_a[i][f_tok] = {e_tok}
+                    else:
+                        fixed_a[i][f_tok].add(e_tok)
+                if f_tok not in all_a:
+                    all_a[i][f_tok] = {e_tok}
+                else:
+                    all_a[i][f_tok].add(e_tok)
+
+    model.train(bitext, opts.numiter, fixed_a=fixed_a, all_a=all_a)
     if pickle_file:
         pickle.dump(model, open(pickle_file,'wb'))
     model.decode(bitext)

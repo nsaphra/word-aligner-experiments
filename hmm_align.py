@@ -258,8 +258,8 @@ if __name__ == "__main__":
                     all_a[i][f_tok].add(e_tok)
 
     model.train(bitext, opts.numiter, fixed_a=fixed_a, all_a=all_a)
-    if pickle_file:
-        pickle.dump(model, open(pickle_file,'wb'))
+    if opts.pickle_file:
+        pickle.dump(model, open(opts.pickle_file,'wb'))
     model.decode(bitext)
 
 def test_fwd_bkw():

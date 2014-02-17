@@ -141,7 +141,7 @@ class HMMAligner:
         return (gammas_0s, gamma_sum_no_last, gamma_sum_by_vocab, digamma_sum)
 
     # bitext should be [target, source]
-    def train(self, bitext, numiter=100, epsilon=0.5, likely_align_iter=10, fixed_a=None, all_a=None):
+    def train(self, bitext, numiter=100, epsilon=5, likely_align_iter=10, fixed_a=None, all_a=None):
         print >> sys.stderr, "Training ..."
         for i in range(numiter):
             diff = 0.0
@@ -238,8 +238,8 @@ if __name__ == "__main__":
     model = HMMAligner(bitext)
 
     fixed_alignments=[sentence.strip().split() for sentence in open(a_data)]
-    fixed_a = [{} for sentence in fixed_alignments]
-    all_a = [{} for sentence in fixed_alignments]
+    fixed_a = [{} for s in fixed_alignments]
+    all_a = [{} for s in fixed_alignments]
     if fixed_alignments:
         for (i, sentence) in enumerate(fixed_alignments):
             for a in sentence:

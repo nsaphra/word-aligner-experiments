@@ -1,6 +1,7 @@
 module HMMWordAligners
 import DataStructures.OrderedDict
 import DataStructures.DefaultDict
+import DataStructures.DefaultOrderedDict
 
 abstract AbstractWordAligner
 type HMMAligner{S<:String} <: AbstractWordAligner
@@ -11,7 +12,7 @@ type HMMAligner{S<:String} <: AbstractWordAligner
     # P(F|E)
     align_probs::Dict{S, Dict{S, Float64}}
 
-    trans_probs::OrderedDict{Int, Float64}
+    trans_probs::DefaultOrderedDict{Int, Float64, Float64}
     start_probs::Vector{Float64}
 
     function HMMAligner(f_vocab::Set{S}, e_vocab::Set{S};
@@ -26,7 +27,7 @@ type HMMAligner{S<:String} <: AbstractWordAligner
 
         trans_prob = ((1.0 - diag_prob) / (jump_range * 2))::Float64
 #        trans_probs = OrderedDict{Int, Float64}()
-        trans_probs = OrderedDict([(j, trans_prob) for j=-jump_range:jump_range])
+        trans_probs = DefaultOrderedDict(0.0, [(j, trans_prob) for j=-jump_range:jump_range])
         trans_probs[1] = diag_prob
 
         start_prob = (1.0 - diag_prob) / (jump_range - 1)
@@ -185,7 +186,7 @@ function expectation_step(c::HMMAlignerECounts, a, f_sent, e_sent)
     end
 end
 
-function train{S}(a, bitext::Vector{(Vector{S}, Vector{S})}, numiter=100, epsilon=0.5)
+function train{S}(a, bitext::Vector{(Vector{S}, Vector{S})}; numiter=100, epsilon=0.5)
     for iter = 1:numiter
         diff = 0.0
         if iter%10 == 0
@@ -232,14 +233,14 @@ end
 
 function decode(a, bitext)
     for (f_sent, e_sent) = bitext
-        V = [[0.0 for e_ind=1:length(e_sent)] for f_ind=1:length(f_sent)]
-        path = {}
+        V = zeros(Float64, length(f_sent), length(e_sent))
+        path = [Array(Int, 1) for e=e_sent]
 
-        for e_ind = keys(a.start_probs)
+        for (e_ind, start_prob) = enumerate(a.start_probs)
             if e_ind > length(e_sent)
                 break
             end
-            V[1][e_ind] = a.start_probs[e_ind] * a.align_probs[f_sent[1]][e_sent[e]]
+            V[1, e_ind] = start_prob * a.align_probs[f_sent[1]][e_sent[e_ind]]
             path[e_ind] = [e_ind]
         end
 
@@ -248,18 +249,18 @@ function decode(a, bitext)
                 continue
             end
 
-            new_path = Dict()
+            new_path = [Array(Int, 1) for e=e_sent]
             for (e_ind, e) = enumerate(e_sent)
                 (best_prob, best_prev_e) = findmax(
-                    [V[f_ind-1][prev_e_ind] * a.trans_probs[e_ind - prev_e_ind] * a.align_probs(f, e)
-                     for prev_e_ind = 1:length(V[f_ind-1])])
-                V[f_ind][e_ind] = best_prob
-                new_path[e_ind] = path[best_prev_e] + [e_ind]
+                    [V[f_ind-1, prev_e_ind] * a.trans_probs[e_ind - prev_e_ind] * a.align_probs[f][e]
+                     for prev_e_ind = 1:length(V[f_ind-1, :])])
+                V[f_ind, e_ind] = best_prob
+                new_path[e_ind] = [path[best_prev_e], [e_ind]]
             end
             path = new_path
         end
 
-        (p, end_e) = findmax([V[length(f_sent)][e_ind] for e_ind=1:length(e_sent)])
+        (p, end_e) = findmax([V[length(f_sent), e_ind] for e_ind=1:length(e_sent)])
         for (f_ind, e_ind) = enumerate(path[end_e])
              @printf "%i-%i " f_ind e_ind
         end
@@ -279,15 +280,8 @@ function main(opts)
 
     #TODO get rid of type param for constructor
     model = HMMAligner{String}(bitext)
-    train(model, bitext)
-
-    for __e = bitext
-        try
-            decode(model, [__e])
-        catch
-            println()
-        end
-    end
+    train(model, bitext, numiter=opts["num_iterations"])
+    decode(model, bitext)
 end
 
 end # HMMWordAligners

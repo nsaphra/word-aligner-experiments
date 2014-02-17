@@ -1,7 +1,6 @@
 module HMMWordAligners
 import DataStructures.OrderedDict
 import DataStructures.DefaultDict
-import DataStructures.DefaultOrderedDict
 
 abstract AbstractWordAligner
 type HMMAligner{S<:String} <: AbstractWordAligner
@@ -13,7 +12,7 @@ type HMMAligner{S<:String} <: AbstractWordAligner
     align_probs::Dict{S, Dict{S, Float64}}
 
     trans_probs::OrderedDict{Int, Float64}
-    start_probs::OrderedDict{Int, Float64}
+    start_probs::Vector{Float64}
 
     function HMMAligner(f_vocab::Set{S}, e_vocab::Set{S};
                         jump_range=10, diag_prob=0.5, init_dist="uniform")
@@ -31,7 +30,7 @@ type HMMAligner{S<:String} <: AbstractWordAligner
         trans_probs[1] = diag_prob
 
         start_prob = (1.0 - diag_prob) / (jump_range - 1)
-        start_probs = OrderedDict([(j, start_prob) for j=1:jump_range])
+        start_probs = [start_prob for j=1:jump_range]
         start_probs[1] = diag_prob
 
         new(f_vocab, e_vocab, align_probs, trans_probs, start_probs)
@@ -81,7 +80,7 @@ function forward(a, f_sent, e_sent)
     for (f_ind, f) = enumerate(f_sent)
         # base case
         if f_ind == 1
-            for (jmp, start_prob) = a.start_probs
+            for (jmp, start_prob) = enumerate(a.start_probs)
                 if jmp > length(e_sent)
                     break
                 end
@@ -90,7 +89,6 @@ function forward(a, f_sent, e_sent)
             continue
         end
 
-        println(a.trans_probs)
         for (jmp, trans_prob) = a.trans_probs,
             (prev_e_ind, p) = enumerate(fwd[f_ind - 1,:])
             e_ind = prev_e_ind + jmp
@@ -117,7 +115,6 @@ function backward(a, f_sent, e_sent)
             continue
         end
 
-        println(a.trans_probs)
         for (jmp, trans_prob) = a.trans_probs,
             (next_e_ind, p) = enumerate(bkw[f_ind + 1,:])
             e_ind = next_e_ind - jmp
@@ -134,51 +131,38 @@ function expectation_step(c::HMMAlignerECounts, a, f_sent, e_sent)
     fwd = forward(a, f_sent, e_sent)
     bkw = backward(a, f_sent, e_sent)
 
-    print("YO")
-    println(a.trans_probs)
     for (f_ind, f) = enumerate(f_sent)
         gamma_denom = 0.0
         digamma_denom = 0.0
 
-        print("WHAT")
-        println(a.trans_probs)
         for (e_ind, e) = enumerate(e_sent)
-            print("poo")
-            println(a.trans_probs)
             gamma_denom += fwd[f_ind, e_ind] * bkw[f_ind, e_ind]
-            
-            print("poo2")
-            println(a.trans_probs)
 
             if (f_ind == length(f_sent))
                 continue # last token doesn't give trans prob
             end
             for (jmp, trans_prob) = a.trans_probs
                 e_ind2 = e_ind + jmp
-                @bound_loop(e_ind, e_sent)
+                @bound_loop(e_ind2, e_sent)
                 
                 digamma_denom += fwd[f_ind, e_ind] * trans_prob * bkw[f_ind+1, e_ind2] *
                                  a.align_probs[f_sent[f_ind+1]][e_sent[e_ind2]]
             end
-            print("poo3")
-            println(a.trans_probs)
-            if digamma_denom == 0
-                digamma_denom = 1e-9
-            end
-            print("poo4")
-            println(a.trans_probs)
+        end
+        if digamma_denom == 0
+            digamma_denom = 1e-9 # TODO logs
+        end
+        if gamma_denom == 0
+            gamma_denom = 1e-9 # TODO logs
         end
 
-print("HI")
-println(a.trans_probs)
         for (e_ind, e) = enumerate(e_sent)
-            if gamma_denom == 0
-                gamma_denom = 1e-9 # TODO logs
+            new_gamma = fwd[f_ind, e_ind] * bkw[f_ind, e_ind] / gamma_denom
+            if (new_gamma == 0)
+                continue
             end
 
-            new_gamma = fwd[f_ind, e_ind] * bkw[f_ind, e_ind] / gamma_denom
             c.gamma_sum_by_vocab[e][f] += new_gamma
-
             if f_ind == 1
                 c.gammas_start[e_ind] += new_gamma
             end
@@ -186,11 +170,8 @@ println(a.trans_probs)
             if f_ind == length(f_sent)
                 continue
             end
-
             # transition probs
             c.gamma_sum_no_last += new_gamma
-            # TODO make macro for this
-            println(a.trans_probs)
             for (jmp, trans_prob) = a.trans_probs
                 e_ind2 = e_ind + jmp
                 @bound_loop(e_ind2, e_sent)
@@ -208,7 +189,7 @@ function train{S}(a, bitext::Vector{(Vector{S}, Vector{S})}, numiter=100, epsilo
     for iter = 1:numiter
         diff = 0.0
         if iter%10 == 0
-            write(STDERR, "Training")
+            @printf(STDERR, "Training ... iter %i\n", iter)
         end
 
         counts = HMMAlignerECounts{S}(0.0,
@@ -240,6 +221,9 @@ function train{S}(a, bitext::Vector{(Vector{S}, Vector{S})}, numiter=100, epsilo
             diff += abs(a.trans_probs[jump] - old_p)
         end
 
+        if iter%10 == 0
+            @printf(STDERR, "diff %f", diff)
+        end
         if diff < epsilon
             break
         end

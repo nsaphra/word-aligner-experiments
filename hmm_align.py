@@ -16,13 +16,16 @@ class HMMAligner:
             self.align_probs = align_probs
             # TODO make this part work if necessary
         else:
-            dim = len(self.e_vocab) * len(self.f_vocab)
-            self.align_probs = {}
-            for f in self.f_vocab:
-                self.align_probs[f] = {}
-                for e in self.e_vocab:
-                    # p(f|e)
-                    self.align_probs[f][e] = 1.0 / dim
+            total_cnts = defaultdict(float)
+            self.align_probs = {f:defaultdict(float) for f in self.f_vocab}
+            for (f_sent, e_sent) in bitext:
+                for f in f_sent:
+                    for e in e_sent:
+                        total_cnts[f] += 1
+                        self.align_probs[f][e] += 1
+            for (f, e_probs) in self.align_probs.items():
+                for e in e_probs.keys():
+                    e_probs[e] /= total_cnts[f]
 
         # frumious hack, TODO better initialization
         # Initialize with higher diagonal probabilities.

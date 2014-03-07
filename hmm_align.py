@@ -193,31 +193,41 @@ class HMMAligner:
 
     def decode(self, bitext):
         for (f_sent, e_sent) in bitext:
-            alignments = ""
-            V = [defaultdict(float) for f in f_sent]
+            V = [[0.0 for e in e_sent] for f in f_sent]
             path = {}
 
-            for e_ind in self.start_probs.keys():
-                if e_ind >= len(e_sent):
-                    break
-                V[0][e_ind] = self.start_probs[e_ind] * self.align_probs[f_sent[0]][e_sent[e_ind]]
-                path[e_ind] = [e_ind]
+            for (e_ind,e) in enumerate(e_sent):
+                if e_ind in self.start_probs:
+                    V[0][e_ind] = self.start_probs[e_ind] * self.align_probs[f_sent[0]][e_sent[e_ind]]
+                    path[e_ind] = [e_ind]
 
             for (f_ind, f) in enumerate(f_sent):
-                if (f_ind == 0):
-                    continue # TODO seriously get rid of all these nops on 0 / end inds
+                if f_ind == 0:
+                    continue
                 new_path = {}
 
                 for (e_ind, e) in enumerate(e_sent):
-                    (best_prob, best_prev_e) = max(\
-                        (V[f_ind-1][prev_e_ind] * self.trans_probs[e_ind - prev_e_ind] * self.align_probs[f][e], \
-                             prev_e_ind) \
-                            for prev_e_ind in V[f_ind-1].keys())
-                    V[f_ind][e_ind] = best_prob
-                    new_path[e_ind] = path[best_prev_e] + [e_ind]
+                    best_prob = 0.0
+                    best_prev_e = 0
+
+                    for prev_e_ind in range(len(V[f_ind-1])):
+                        jump = e_ind - prev_e_ind
+                        if jump in self.trans_probs and V[f_ind-1][prev_e_ind]:
+                            trans_prob = self.trans_probs[jump]
+                            align_prob = self.align_probs[f][e]
+                            prob_c = V[f_ind-1][prev_e_ind] * \
+                                trans_prob * \
+                                align_prob
+                            if prob_c > best_prob:
+                                best_prob = prob_c
+                                best_prev_e = prev_e_ind
+                    if best_prob:
+                        V[f_ind][e_ind] = best_prob
+                        new_path[e_ind] = path[best_prev_e] + [e_ind]
                 path = new_path
 
-            (p, end_e) = max((V[len(f_sent) - 1][e_ind], e_ind) for e_ind in range(len(e_sent)))
+            (p, end_e) = max([(V[len(f_sent) - 1][e_ind], e_ind) for e_ind in range(len(e_sent))], key=operator.itemgetter(0))
+            alignments = ""
             for (f_ind, e_ind) in enumerate(path[end_e]):
                 alignments += "%i-%i " % (f_ind, e_ind)
             print(alignments)

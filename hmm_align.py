@@ -114,11 +114,6 @@ class HMMAligner:
                     digamma_denom += fwd[f_ind][e_ind] * self.trans_probs[e_ind2 - e_ind] \
                         * bkw[f_ind+1][e_ind2] * self.align_probs[f_sent[f_ind+1]][e2]
 
-#                digamma_denom += \
-#                    sum(fwd[f_ind][e_ind] * self.trans_probs[e_ind2 - e_ind] \
-#                            * bkw[f_ind+1][e_ind2] * self.align_probs[f_sent[f_ind+1]][e2] \
-#                            for (e_ind2, e2) in enumerate(e_sent))
-
             for (e_ind, e) in enumerate(e_sent):
                 # temporary for testing. will switch to log probs. TODO
                 if gamma_denom == 0:
@@ -150,10 +145,8 @@ class HMMAligner:
             diff = 0.0
             if i%5 == 0:
                 print >> sys.stderr, "Iteration %i"%i
-            # gamma_i(t) = P(X_t = i | Y, theta)
             gamma_sum_no_last = 0.0
             gamma_sum_by_vocab = dict((e, defaultdict(float)) for e in self.e_vocab)
-            # digamma_{i,j}(t) = P(X_t = i, X_{t+1} = j | Y, theta)
             digamma_sum = defaultdict(float)
             gammas_0s = defaultdict(float)
 
